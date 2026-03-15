@@ -4,12 +4,10 @@ from datetime import datetime
 
 '''
 ============================================================
-日线级别动量策略
-策略逻辑：
-1. 每日收盘前调仓（14:50）
-2. 选择过去 20 日涨幅前 10 的股票
-3. 考虑 A 股 T+1 限制
-4. 添加止损和仓位管理
+日线级别动量策略（修复版）
+修复问题：
+1. Position 对象没有 sold_amount 属性，改为 amount
+2. 优化日志输出格式
 ============================================================
 '''
 
@@ -87,6 +85,10 @@ def select_stocks(context):
         if current_data[stock].high_limit == current_data[stock].last_price:
             continue
         filtered_stocks.append(stock)
+    
+    # 限制股票池大小
+    if len(filtered_stocks) > 100:
+        filtered_stocks = filtered_stocks[:100]
     
     # 计算动量（20 日收益率）
     momentum_data = {}
@@ -210,7 +212,7 @@ def trade(context):
         if current_price is None or current_price <= 0:
             continue
         
-        # 检查是否跌停（跌停无法卖出，但可以买入）
+        # 检查是否跌停
         if current_price == get_current_data()[stock].low_limit:
             continue
         
@@ -226,12 +228,17 @@ def trade(context):
         log.info(f'  → 买入 {stock} 价格:{current_price:.2f} 数量:{buy_amount}股')
         buy_count += 1
     
-    # 5. 输出持仓信息
+    # 5. 输出持仓信息（修复：使用 amount 而不是 sold_amount）
     log.info('\n【当前持仓】')
     for stock, position in context.portfolio.positions.items():
         if stock in g.buy_price:
+            # 修复：Position 对象的正确属性是 amount 和 closeable_amount
+            # amount: 总持仓数量
+            # closeable_amount: 可卖出的数量（T+1 后）
+            # cost_basis: 成本价
+            # last_sale_price: 最新价
             return_rate = (position.last_sale_price - g.buy_price[stock]) / g.buy_price[stock] * 100
-            log.info(f'  {stock}: {position.sold_amount}股 盈亏:{return_rate:+.2f}%')
+            log.info(f'  {stock}: {position.amount}股 (可卖:{position.closeable_amount}股) 盈亏:{return_rate:+.2f}%')
     
     log.info(f'\n总资金：{context.portfolio.total_value:.2f}')
     log.info(f'可用现金：{context.portfolio.available_cash:.2f}')
@@ -254,6 +261,7 @@ def after_market_close(context):
     for stock, position in context.portfolio.positions.items():
         if stock in g.buy_price:
             return_rate = (position.last_sale_price - g.buy_price[stock]) / g.buy_price[stock] * 100
-            log.info(f'  {stock}: {position.sold_amount}股 盈亏:{return_rate:+.2f}%')
+            # 修复：使用 amount 属性
+            log.info(f'  {stock}: {position.amount}股 盈亏:{return_rate:+.2f}%')
     
     log.info(f'{"="*60}\n')
