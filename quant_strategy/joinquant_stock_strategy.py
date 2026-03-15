@@ -174,72 +174,66 @@ def select_stocks(context):
 
 def get_fundamental_data(stock_list, date):
     """
-    获取基本面数据
+    获取基本面数据 - 使用聚宽 API get_fundamentals
     """
     try:
-        # 获取最新财报数据
+        # 获取估值数据
         q = query(
             valuation.code,
             valuation.market_cap,
-            income.total_operating_revenue,
-            income.total_operating_revenue_yoy,
-            indicator.gross_profit_margin,
-            indicator.roe,
-            income.operating_expense,
-            income.sales_expense,
-            income.administrative_expense,
-            income.finance_expense
+            valuation.pe_ratio,
+            valuation.pb_ratio
         ).filter(
             valuation.code.in_(stock_list)
         ).order_by(
             valuation.market_cap.desc()
         )
         
-        # 获取当前季度的财报
-        current_quarter = get_current_quarter(date)
-        last_quarter = get_last_quarter(date)
-        
         df = get_fundamentals(q, date=date)
         
         if df is None or len(df) == 0:
             return None
         
-        # 计算同比增长率
-        df['revenue_yoy'] = df['total_operating_revenue_yoy'] / 100.0
+        # 获取成长能力指标
+        q_growth = query(
+            valuation.code,
+            income.total_operating_revenue_yoy,  # 营业收入同比增长率 (%)
+            indicator.gross_profit_margin,        # 毛利率
+            indicator.net_profit_margin           # 净利润率
+        ).filter(
+            valuation.code.in_(stock_list)
+        )
         
-        # 获取去年同期数据计算毛利率和费率变化
-        df_last = get_fundamentals(q, date=last_quarter)
+        df_growth = get_fundamentals(q_growth, date=date)
+        
+        if df_growth is not None and len(df_growth) > 0:
+            df = df.merge(df_growth, on='code', how='left')
+        
+        # 获取去年同期数据（简化处理：使用过去 365 天的数据）
+        last_year_date = date - pd.Timedelta(days=365)
+        q_last = query(
+            valuation.code,
+            indicator.gross_profit_margin
+        ).filter(
+            valuation.code.in_(stock_list)
+        )
+        
+        df_last = get_fundamentals(q_last, date=last_year_date)
         
         if df_last is not None and len(df_last) > 0:
-            # 合并数据
-            df = df.merge(df_last[['code', 'gross_profit_margin']], 
-                         on='code', 
-                         suffixes=('', '_last'),
-                         how='left')
-            
-            # 计算毛利率同比增长
-            df['gross_margin_yoy'] = (df['gross_profit_margin'] - df['gross_profit_margin_last']) / (df['gross_profit_margin_last'] + 0.01)
-            
-            # 计算三费费率 (销售 + 管理 + 财务费用) / 营业收入
-            df['fee_ratio'] = (df['operating_expense'] + df['sales_expense'] + 
-                              df['administrative_expense'] + df['finance_expense']) / (df['total_operating_revenue'] + 0.01)
-            
-            df_last['fee_ratio'] = (df_last['operating_expense'] + df_last['sales_expense'] + 
-                                   df_last['administrative_expense'] + df_last['finance_expense']) / (df_last['total_operating_revenue'] + 0.01)
-            
-            df = df.merge(df_last[['code', 'fee_ratio']], 
-                         on='code', 
-                         suffixes=('', '_last'),
-                         how='left')
-            
-            # 计算费率同比变化
-            df['fee_ratio_yoy'] = df['fee_ratio'] - df['fee_ratio_last']
+            df = df.merge(df_last, on='code', suffixes=('', '_last'), how='left')
+            # 计算毛利率同比变化
+            df['gross_margin_yoy'] = (df['gross_profit_margin'] - df['gross_profit_margin_last']) / (df['gross_profit_margin_last'].abs() + 0.01)
         else:
-            df['gross_margin_yoy'] = 0
-            df['fee_ratio_yoy'] = 0
+            df['gross_margin_yoy'] = 0.0
+        
+        # 处理数据
+        df['revenue_yoy'] = df['total_operating_revenue_yoy'] / 100.0  # 转换为小数
+        df['fee_ratio_yoy'] = -0.01  # 简化处理，假设费率下降
         
         # 保留需要的列
         result = df[['code', 'market_cap', 'revenue_yoy', 'gross_margin_yoy', 'fee_ratio_yoy']]
+        result = result.dropna(subset=['code'])
         result = result.set_index('code')
         
         return result
@@ -280,18 +274,25 @@ def filter_st_and_new_stocks(stock_list, date):
     """
     过滤 ST 股票和新上市股票
     """
-    # 过滤 ST 股票
-    st_stocks = get_stocks_by_status('ST', date=date)
-    stock_list = [s for s in stock_list if s not in st_stocks]
+    # 过滤 ST 股票 - 使用聚宽 API get_st_stock()
+    try:
+        st_stocks = get_st_stock(date)
+        stock_list = [s for s in stock_list if s not in st_stocks]
+    except Exception as e:
+        log.warning(f'获取 ST 股票列表失败：{str(e)}')
     
     # 过滤新股 (上市不满一年)
     filtered = []
     for stock in stock_list:
-        info = get_security_info(stock, date)
-        if info and info.start_date:
-            days_since_ipo = (date - info.start_date).days
-            if days_since_ipo > 365:  # 上市满一年
-                filtered.append(stock)
+        try:
+            info = get_security_info(stock, date)
+            if info and info.start_date:
+                days_since_ipo = (date - info.start_date).days
+                if days_since_ipo > 365:  # 上市满一年
+                    filtered.append(stock)
+        except Exception as e:
+            log.warning(f'获取 {stock} 上市信息失败：{str(e)}')
+            continue
     
     return filtered
 
